@@ -1,52 +1,107 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Mail, User, CheckCircle, Building2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { validateLeadForm, ValidationError } from '@/lib/validation';
 import { supabase } from '@/integrations/supabase/client';
+import { useLeadStore } from '@/lib/lead-store';
+import { useToast } from '@/hooks/use-toast';
 
 export const LeadCaptureForm = () => {
   const [formData, setFormData] = useState({ name: '', email: '', industry: '' });
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
-  const [submitted, setSubmitted] = useState(false);
-  const [leads, setLeads] = useState<
-    Array<{ name: string; email: string; industry: string; submitted_at: string }>
-  >([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { submitted, sessionLeads, setSubmitted, addLead } = useLeadStore();
+  const { toast } = useToast();
+  const submissionRef = useRef(false);
 
   useEffect(() => {
     setSubmitted(false);
-  }, []);
+    submissionRef.current = false;
+  }, [setSubmitted]);
   const getFieldError = (field: string) => {
     return validationErrors.find(error => error.field === field)?.message;
   };
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Prevent double submissions
+    if (isSubmitting || submissionRef.current) {
+      console.log('Submission already in progress, ignoring duplicate request');
+      return;
+    }
+    
+    submissionRef.current = true;
+    setIsSubmitting(true);
+    
+    console.log('Starting form submission for:', formData.email);
+    
     const errors = validateLeadForm(formData);
     setValidationErrors(errors);
 
     if (errors.length === 0) {
-      // Save to database
-try {
-  const { error: emailError } = await supabase.functions.invoke('send-confirmation', {
-    body: {
-      name: formData.name,
-      email: formData.email,
-      industry: formData.industry,
-    },
-  });
-
-  if (emailError) {
-    console.error('Error sending confirmation email:', emailError);
-  } else {
-    console.log('Confirmation email sent successfully');
-  }
-} catch (emailError) {
-  console.error('Error calling email function:', emailError);
-}
-
-      // Send confirmation email
       try {
+        // Check if email already exists
+        const { data: existingLead, error: checkError } = await supabase
+          .from('leads')
+          .select('email')
+          .eq('email', formData.email)
+          .single();
+
+        if (existingLead && !checkError) {
+          toast({
+            title: "Already Registered",
+            description: "This email is already registered. Check your inbox for the confirmation email.",
+          });
+          setSubmitted(true);
+          setFormData({ name: '', email: '', industry: '' });
+          setIsSubmitting(false);
+          submissionRef.current = false;
+          return;
+        }
+
+        console.log('Saving lead to database...');
+        // Save to database first
+        const { data: insertData, error: dbError } = await supabase
+          .from('leads')
+          .insert({
+            name: formData.name,
+            email: formData.email,
+            industry: formData.industry,
+          })
+          .select();
+
+        if (dbError) {
+          console.error('Error saving lead to database:', dbError);
+          
+          // Check if it's a duplicate email error
+          if (dbError.message?.includes('unique_email') || dbError.code === '23505') {
+            toast({
+              title: "Already Registered",
+              description: "This email is already registered. Check your inbox for the confirmation email.",
+            });
+            setSubmitted(true);
+            setFormData({ name: '', email: '', industry: '' });
+            setIsSubmitting(false);
+            submissionRef.current = false;
+            return;
+          }
+          
+          toast({
+            title: "Error",
+            description: "Failed to save your information. Please try again.",
+            variant: "destructive",
+          });
+          setIsSubmitting(false);
+          submissionRef.current = false;
+          return;
+        }
+
+        console.log('Lead saved to database successfully:', insertData);
+
+        console.log('Sending confirmation email...');
+        // Send confirmation email only after successful database save
         const { error: emailError } = await supabase.functions.invoke('send-confirmation', {
           body: {
             name: formData.name,
@@ -57,23 +112,40 @@ try {
 
         if (emailError) {
           console.error('Error sending confirmation email:', emailError);
+          // Still continue with success flow even if email fails
+          toast({
+            title: "Partial Success",
+            description: "Your information was saved, but we couldn't send the confirmation email.",
+          });
         } else {
           console.log('Confirmation email sent successfully');
+          toast({
+            title: "Success!",
+            description: "Welcome aboard! Check your email for confirmation.",
+          });
         }
-      } catch (emailError) {
-        console.error('Error calling email function:', emailError);
-      }
 
-      const lead = {
-        name: formData.name,
-        email: formData.email,
-        industry: formData.industry,
-        submitted_at: new Date().toISOString(), 
-      };
-      setLeads([...leads, lead]);
-      setSubmitted(true);
-      setFormData({ name: '', email: '', industry: '' });
+        // Update store state
+        const lead = {
+          name: formData.name,
+          email: formData.email,
+          submitted_at: new Date().toISOString(), 
+        };
+        addLead(lead);
+        setSubmitted(true);
+        setFormData({ name: '', email: '', industry: '' });
+
+      } catch (error) {
+        console.error('Error in form submission:', error);
+        toast({
+          title: "Error",
+          description: "Something went wrong. Please try again.",
+          variant: "destructive",
+        });
+      }
     }
+    setIsSubmitting(false);
+    submissionRef.current = false;
   };
 
   const handleInputChange = (field: string, value: string) => {
@@ -100,7 +172,7 @@ try {
           </p>
 
           <p className="text-sm text-accent mb-8">
-            You're #{leads.length} in this session
+            You're #{sessionLeads.length} in this session
           </p>
 
           <div className="space-y-4">
@@ -114,7 +186,10 @@ try {
             </div>
 
             <Button
-              onClick={() => setSubmitted(false)}
+              onClick={() => {
+                setSubmitted(false);
+                submissionRef.current = false;
+              }}
               variant="outline"
               className="w-full border-border hover:bg-accent/10 transition-smooth group"
             >
@@ -209,10 +284,11 @@ try {
 
           <Button
             type="submit"
-            className="w-full h-12 bg-gradient-primary text-primary-foreground font-semibold rounded-lg shadow-glow hover:shadow-[0_0_60px_hsl(210_100%_60%/0.3)] transition-smooth transform hover:scale-[1.02]"
+            disabled={isSubmitting}
+            className="w-full h-12 bg-gradient-primary text-primary-foreground font-semibold rounded-lg shadow-glow hover:shadow-[0_0_60px_hsl(210_100%_60%/0.3)] transition-smooth transform hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CheckCircle className="w-5 h-5 mr-2" />
-            Get Early Access
+            {isSubmitting ? 'Submitting...' : 'Get Early Access'}
           </Button>
         </form>
 

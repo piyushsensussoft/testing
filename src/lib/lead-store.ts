@@ -3,6 +3,7 @@ import { create } from 'zustand';
 export interface Lead {
   name: string;
   email: string;
+  industry?: string;
   submitted_at: string;
 }
 
@@ -11,6 +12,7 @@ interface LeadStore {
   sessionLeads: Lead[];
   setSubmitted: (submitted: boolean) => void;
   addLead: (lead: Lead) => void;
+  clearLeads: () => void;
 }
 
 export const useLeadStore = create<LeadStore>((set) => ({
@@ -25,5 +27,9 @@ export const useLeadStore = create<LeadStore>((set) => ({
     set((state) => ({
       sessionLeads: [...state.sessionLeads, lead],
     }));
+  },
+
+  clearLeads: () => {
+    set({ sessionLeads: [] });
   },
 }));
